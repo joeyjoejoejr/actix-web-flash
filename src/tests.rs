@@ -1,19 +1,18 @@
 use crate::{FlashMessage, FlashMiddleware, FlashResponse, Responder};
-use actix_http::HttpService;
-use actix_http_test::TestServer;
 use actix_web::http::{Cookie, StatusCode};
 use actix_web::test::{self, TestRequest};
 use actix_web::{http, web, App, FromRequest, HttpRequest, HttpResponse};
 
-#[test]
+#[cfg(test)]
+
 /// Ensure the response properly sets the `_flash` cookie.
-fn sets_cookie() {
+#[actix_rt::test]
+async fn sets_cookie() {
     let msg = "Test Message".to_owned();
     let responder = FlashResponse::new(Some(msg.clone()), HttpResponse::Ok().finish());
 
     let req = TestRequest::default().to_http_request();
-
-    let resp = test::block_on(responder.respond_to(&req)).unwrap();
+    let resp = responder.respond_to(&req).await.unwrap();
 
     let cookies = resp
         .cookies()
@@ -25,41 +24,30 @@ fn sets_cookie() {
     assert_eq!(cookies[0].value(), format!("\"{}\"", msg));
 }
 
-#[test]
+#[actix_rt::test]
 /// Ensure flash message is extracted from `_flash` cookie.
-fn get_cookie() {
+async fn get_cookie() {
     let req = TestRequest::with_header("Cookie", "_flash=\"Test Message\"").to_http_request();
-    let msg = FlashMessage::<String>::extract(&req).unwrap();
+    let msg = FlashMessage::<String>::extract(&req).await.unwrap();
     assert_eq!(msg.into_inner(), "Test Message");
 }
 
-#[test]
+#[actix_rt::test]
 /// Ensure improper cookie contents lead to an error.
-fn bad_request() {
+async fn bad_request() {
     let req = TestRequest::with_header("Cookie", "_flash=Missing quotes").to_http_request();
-    let err = FlashMessage::<String>::extract(&req).unwrap_err();
+    let err = FlashMessage::<String>::extract(&req).await.unwrap_err();
     // Don't return raw serialization errors
     assert!(std::error::Error::downcast_ref::<serde_json::error::Error>(&err).is_none());
     let resp = HttpResponse::from(err);
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST)
 }
 
-fn minimal_app() -> actix_http_test::TestServerRuntime {
-    TestServer::new(|| {
-        HttpService::new(
-            App::new()
-                .wrap(FlashMiddleware::default())
-                .route("/show_flash", web::get().to(show_flash))
-                .route("/set_flash", web::get().to(set_flash)),
-        )
-    })
-}
-
-fn show_flash(flash: FlashMessage<String>) -> impl Responder {
+async fn show_flash(flash: FlashMessage<String>) -> impl Responder {
     flash.into_inner()
 }
 
-fn set_flash(_req: HttpRequest) -> FlashResponse<HttpResponse, String> {
+async fn set_flash(_req: HttpRequest) -> FlashResponse<HttpResponse, String> {
     FlashResponse::new(
         Some("This is the message".to_owned()),
         HttpResponse::SeeOther()
@@ -68,35 +56,43 @@ fn set_flash(_req: HttpRequest) -> FlashResponse<HttpResponse, String> {
     )
 }
 
-#[test]
+#[actix_rt::test]
 /// Integration test to assure the cookie is deleted on request
-fn cookie_is_set() {
-    use actix_http::httpmessage::HttpMessage;
+async fn cookie_is_set() {
+    let mut srv = test::init_service(
+        App::new()
+            .wrap(FlashMiddleware::default())
+            .route("/show_flash", web::get().to(show_flash))
+            .route("/set_flash", web::get().to(set_flash)),
+    ).await;
 
-    let mut srv = minimal_app();
-
-    let req = srv.get("/set_flash");
-    let resp = srv.block_on(req.send()).unwrap();
+    let req = test::TestRequest::get().uri("/set_flash").to_request();
+    let resp = test::call_service(&mut srv, req).await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let cookie = resp.cookie("_flash").unwrap();
+    let cookie = resp.response().cookies().find(|cookie| cookie.name() == "_flash").unwrap();
     assert_eq!(cookie.value(), "\"This is the message\"");
 }
 
-#[test]
+#[actix_rt::test]
 /// Integration test to assure the cookie is deleted on request
-fn cookie_is_unset() {
-    use actix_http::httpmessage::HttpMessage;
+async fn cookie_is_unset() {
+    let mut srv = test::init_service(
+        App::new()
+            .wrap(FlashMiddleware::default())
+            .route("/show_flash", web::get().to(show_flash))
+            .route("/set_flash", web::get().to(set_flash)),
+    ).await;
 
-    let mut srv = minimal_app();
-    let req = srv.get("/").cookie(
+    let req = test::TestRequest::get().uri("/").cookie(
         http::Cookie::build("_flash", "To be deleted")
             .path("/")
             .finish(),
-    );
-    let resp = srv.block_on(req.send()).unwrap();
+    ).to_request();
+    let resp = test::call_service(&mut srv, req).await;
     println!("{:?}", resp);
-    let cookie = resp.cookie("_flash").unwrap();
+
+    let cookie = resp.response().cookies().find(|cookie| cookie.name() == "_flash").unwrap();
     println!("Cookie: {:?}", cookie);
     assert!(cookie.expires().unwrap() < time::now());
 }

@@ -7,7 +7,7 @@ struct Password {
     password: String,
 }
 
-fn get_login(flash: Option<FlashMessage<String>>) -> impl Responder {
+async fn get_login(flash: Option<FlashMessage<String>>) -> impl Responder {
     let error = flash
         .map(|i| i.into_inner())
         .unwrap_or_else(|| "".to_owned());
@@ -24,13 +24,12 @@ fn get_login(flash: Option<FlashMessage<String>>) -> impl Responder {
     "#,
         error
     );
-    let resp = HttpResponse::Ok()
+    HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(form);
-    resp
+        .body(form)
 }
 
-fn post_login(form: web::Form<Password>) -> impl Responder {
+async fn post_login(form: web::Form<Password>) -> impl Responder {
     if form.into_inner().password == "hunter2" {
         FlashResponse::new(None, "Correct Password!".into())
     } else {
@@ -38,15 +37,15 @@ fn post_login(form: web::Form<Password>) -> impl Responder {
     }
 }
 
-fn main() {
+#[actix_rt::main]
+async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
             .wrap(FlashMiddleware::default())
             .route("/login", web::get().to(get_login))
             .route("/login", web::post().to(post_login))
     })
-    .bind("127.0.0.1:8080")
-    .unwrap()
+    .bind("127.0.0.1:8080")?
     .run()
-    .unwrap();
+    .await
 }

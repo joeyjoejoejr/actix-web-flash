@@ -18,11 +18,11 @@
 //! use actix_web::{http, web, HttpServer, App, HttpRequest, HttpResponse, Responder};
 //! use actix_web_flash::{FlashMessage, FlashResponse, FlashMiddleware};
 //!
-//! fn show_flash(flash: FlashMessage<String>) -> impl Responder {
+//! async fn show_flash(flash: FlashMessage<String>) -> impl Responder {
 //!     flash.into_inner()
 //! }
 //!
-//! fn set_flash(_req: HttpRequest) -> FlashResponse<HttpResponse, String> {
+//! async fn set_flash(_req: HttpRequest) -> FlashResponse<HttpResponse, String> {
 //!     FlashResponse::new(
 //!         Some("This is the message".to_owned()),
 //!         HttpResponse::SeeOther()
@@ -31,15 +31,16 @@
 //!     )
 //! }
 //!
-//! fn main() {
+//! #[actix_rt::main]
+//! async fn main() -> std::io::Result<()> {
 //!     HttpServer::new(|| {
 //!         App::new()
 //!             .wrap(FlashMiddleware::default())
 //!             .route("/show_flash", web::get().to(show_flash))
 //!             .route("/set_flash", web::get().to(set_flash))
-//!     }).bind("127.0.0.1:8080")
-//!         .unwrap()
-//!         .run();
+//!     }).bind("127.0.0.1:8080")?
+//!         .run()
+//!         .await
 //! }
 //! ```
 //! The example above will redirect the user from `/set_flash` to `/show_flash` and pass along
@@ -95,8 +96,13 @@ use actix_web::cookie::{Cookie, CookieJar};
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::error::ErrorBadRequest;
 use actix_web::{Error, FromRequest, HttpMessage, HttpRequest, HttpResponse, Responder};
-use futures::future::{ok as fut_ok, Either as EitherFuture, Future, FutureResult, IntoFuture};
-use futures::Poll;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use futures::{
+    TryFutureExt,
+    future::{Ready, ready, err as fut_err, ok as fut_ok, Either as EitherFuture}
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json;
@@ -106,6 +112,8 @@ mod tests;
 
 pub(crate) const FLASH_COOKIE_NAME: &str = "_flash";
 
+
+type PinBox<T> = Pin<Box<T>>;
 /// Represents a flash message and implements `actix::FromRequest`
 ///
 /// It is used to retrieve the current flash message from a request and to set a new one in
@@ -120,16 +128,16 @@ where
     T: DeserializeOwned,
 {
     type Config = ();
-    type Future = Result<FlashMessage<T>, Self::Error>;
+    type Future = Ready<Result<FlashMessage<T>, Self::Error>>;
     type Error = Error;
 
     fn from_request(req: &HttpRequest, _: &mut actix_web::dev::Payload) -> Self::Future {
         if let Some(cookie) = req.cookie(FLASH_COOKIE_NAME) {
-            let inner = serde_json::from_str(cookie.value())
-                .map_err(|_| ErrorBadRequest("Invalid flash cookie"))?;
-            Ok(FlashMessage(inner))
+            ready(serde_json::from_str(cookie.value())
+                .map_err(|_| ErrorBadRequest("Invalid flash cookie"))
+                .map(FlashMessage))
         } else {
-            Err(ErrorBadRequest("No flash cookie"))
+            fut_err(ErrorBadRequest("No flash cookie"))
         }
     }
 }
@@ -166,15 +174,14 @@ where
     M: Serialize + DeserializeOwned + 'static,
 {
     type Error = actix_http::Error;
-    type Future = Box<dyn Future<Item = HttpResponse, Error = Self::Error>>;
+    type Future = PinBox<dyn Future<Output = Result<HttpResponse, Self::Error>>>;
 
     fn respond_to(mut self, req: &HttpRequest) -> Self::Future {
         let message = self.message.take();
 
-        let out = self
+        let fut = self
             .delegate_to
             .respond_to(req)
-            .into_future()
             .map_err(|e| e.into())
             .and_then(|mut response| {
                 if let Some(msg) = message {
@@ -184,16 +191,15 @@ where
                     flash_cookie.set_path("/");
                     let out = response
                         .add_cookie(&flash_cookie)
-                        .into_future()
                         .map_err(|e| e.into())
                         .map(|_| response);
-                    EitherFuture::A(out)
+                    EitherFuture::Left(ready(out))
                 } else {
-                    EitherFuture::B(futures::future::ok(response))
+                    EitherFuture::Right(fut_ok(response))
                 }
             });
 
-        Box::new(out)
+        Box::pin(fut)
     }
 }
 
@@ -281,7 +287,7 @@ where
     type Error = Error;
     type InitError = ();
     type Transform = FlashMiddlewareServiceWrapper<S>;
-    type Future = FutureResult<Self::Transform, Self::InitError>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
         fut_ok(FlashMiddlewareServiceWrapper(service))
@@ -300,14 +306,19 @@ where
     type Request = ServiceRequest;
     type Response = ServiceResponse<B>;
     type Error = Error;
-    type Future = Box<dyn Future<Item = Self::Response, Error = Self::Error>>;
+    type Future = PinBox<dyn Future<Output = Result<Self::Response, Self::Error>>>;
 
-    fn poll_ready(&mut self) -> Poll<(), Self::Error> {
-        self.0.poll_ready()
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
     }
 
     fn call(&mut self, req: ServiceRequest) -> Self::Future {
-        Box::new(self.0.call(req).and_then(move |mut res| {
+        let fut = self.0.call(req);
+
+        Box::pin(async move {
+            let mut res = fut.await?;
+
             let mut jar = CookieJar::new();
             if let Some(cookie) = res.request().cookie(FLASH_COOKIE_NAME) {
                 jar.add_original(cookie);
@@ -318,6 +329,6 @@ where
             }
 
             Ok(res)
-        }))
+        })
     }
 }

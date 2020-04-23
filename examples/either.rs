@@ -2,7 +2,7 @@ use actix_files::NamedFile;
 use actix_web::{web, App, Either, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_flash::{FlashMessage, FlashMiddleware, FlashResponse};
 
-fn show_flash(flash: FlashMessage<String>) -> impl Responder {
+async fn show_flash(flash: FlashMessage<String>) -> impl Responder {
     flash.into_inner()
 }
 
@@ -12,10 +12,10 @@ fn show_flash(flash: FlashMessage<String>) -> impl Responder {
 /// Unfortunately you can not return arbitrary types implementing `Responder`.
 /// Using returning a boxed trait object will no work due to `respond_to` (a method of `Responder`)
 /// being parameterized via monomorphisation as opposed to dynamic dispatch.
-fn set_flash(req: HttpRequest) -> Either<impl Responder, impl Responder> {
+async fn set_flash(req: HttpRequest) -> Either<impl Responder, impl Responder> {
     if req.query_string().len() > 1 {
         Either::A(FlashResponse::new(
-            Some(format!("Query string: {}", req.query_string()).to_owned()),
+            Some(format!("Query string: {}", req.query_string())),
             HttpResponse::SeeOther()
                 .header(actix_http::http::header::LOCATION, "/show_flash")
                 .finish(),
@@ -25,15 +25,15 @@ fn set_flash(req: HttpRequest) -> Either<impl Responder, impl Responder> {
     }
 }
 
-fn main() {
+#[actix_rt::main]
+async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
             .wrap(FlashMiddleware::default())
             .route("/show_flash", web::get().to(show_flash))
             .route("/set_flash", web::route().to(set_flash))
     })
-    .bind("127.0.0.1:8080")
-    .unwrap()
+    .bind("127.0.0.1:8080")?
     .run()
-    .unwrap();
+    .await
 }
